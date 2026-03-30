@@ -17,14 +17,10 @@ jobs:
             ninja-build meson pkg-config \
             clang cmake unzip zip autoconf libtool bison flex
 
-      # 2️⃣ 安装 Frida 专用 Vala（官方要求）
-      - name: 安装 Frida Vala
+      # 2️⃣ 安装 Frida 专用 Vala 和依赖（valac）
+      - name: 安装 Vala 编译器
         run: |
-          git clone https://github.com/frida/vala.git /tmp/vala-frida
-          cd /tmp/vala-frida
-          ./autogen.sh
-          make -j$(nproc)
-          sudo make install
+          sudo apt-get install -y valac
 
       # 3️⃣ 克隆 Frida
       - name: 克隆 Frida 16.5.6
