@@ -8,15 +8,26 @@ jobs:
     runs-on: ubuntu-22.04
 
     steps:
+      # 1️⃣ 安装依赖
       - name: 安装依赖
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             build-essential git python3 python3-pip \
             ninja-build meson pkg-config \
-            clang cmake unzip zip
+            clang cmake unzip zip autoconf libtool bison flex
 
-      - name: 克隆 Frida
+      # 2️⃣ 安装 Frida 专用 Vala（官方要求）
+      - name: 安装 Frida Vala
+        run: |
+          git clone https://github.com/frida/vala.git /tmp/vala-frida
+          cd /tmp/vala-frida
+          ./autogen.sh
+          make -j$(nproc)
+          sudo make install
+
+      # 3️⃣ 克隆 Frida
+      - name: 克隆 Frida 16.5.6
         uses: actions/checkout@v4
         with:
           repository: frida/frida
@@ -24,12 +35,14 @@ jobs:
           submodules: recursive
           path: frida
 
+      # 4️⃣ 集成 ShadowHook
       - name: 集成 ShadowHook
         run: |
           cd frida/subprojects/frida-gum/gum
           git clone https://github.com/bytedance/android-inline-hook.git shadowhook
 
-      - name: 注入自定义 Hook（关键）
+      # 5️⃣ 注入自定义 Hook（替换 Interceptor）
+      - name: 注入 ShadowHook 代码
         run: |
           cd frida/subprojects/frida-gum/gum
 
@@ -55,15 +68,12 @@ jobs:
 
           int gum_shadowhook_attach(void *target) {
               if (!target) return -1;
-
               HookEntry *e = &g_hooks[g_count++];
-
               int r = shadowhook_hook_func_addr(
                   target,
                   (void *)hook_stub,
                   (void **)&e->orig
               );
-
               return r;
           }
           EOF
@@ -71,32 +81,41 @@ jobs:
       - name: 替换 Interceptor
         run: |
           FILE=frida/subprojects/frida-gum/gum/guminterceptor.c
-
           sed -i '1i extern int gum_shadowhook_attach(void *target);' $FILE
-
           sed -i 's/gum_interceptor_attach.*/gum_interceptor_attach(GumInterceptor *self, gpointer function_address, GumInvocationListener *listener, gpointer data){ return gum_shadowhook_attach(function_address)==0?GUM_ATTACH_OK:GUM_ATTACH_ERROR; }/' $FILE
 
+      # 6️⃣ 去掉 RWX，防检测
       - name: 去 RWX
         run: |
-          find frida -name "gummemory.c" | xargs sed -i \
-            's/PROT_READ | PROT_WRITE | PROT_EXEC/PROT_READ | PROT_WRITE/g'
+          find frida -name "gummemory.c" | xargs sed -i 's/PROT_READ | PROT_WRITE | PROT_EXEC/PROT_READ | PROT_WRITE/g'
 
-      - name: 编译（官方方式）
+      # 7️⃣ 强制开启 server
+      - name: 强制开启 server
         run: |
           cd frida
-          make server-android-arm64
+          export FRIDA_FORCE_SERVER=1
+          sed -i 's/server\s*:\s*false/server : true/g' releng/meson/meson_options.txt || true
 
+      # 8️⃣ 编译 Android ARM64 Server
+      - name: 编译 Frida Server (Android ARM64)
+        run: |
+          cd frida
+          make core-android-arm64 server-android-arm64
+
+      # 9️⃣ 查找产物
       - name: 查找产物
         run: |
           cd frida
           mkdir -p ../out
           find build -name "frida-server" -type f | head -1 | xargs -I{} cp {} ../out/frida-server
 
+      # 🔟 打包
       - name: 打包
         run: |
           cd out
           zip frida-shadowhook.zip frida-server
 
+      # 1️⃣1️⃣ 上传产物
       - name: 上传
         uses: actions/upload-artifact@v4
         with:
