@@ -1,119 +1,52 @@
-name: Build Frida ShadowHook Edition
+name: Build Frida Android
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ 安装依赖
-      - name: 安装依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            build-essential git python3 python3-pip \
-            ninja-build meson pkg-config \
-            clang cmake unzip zip autoconf libtool bison flex
+    - name: Checkout
+      uses: actions/checkout@v3
+      with:
+        submodules: recursive   # ⭐ 必须
 
-      # 2️⃣ 安装 Frida 专用 Vala 和依赖（valac）
-      - name: 安装 Vala 编译器
-        run: |
-          sudo apt-get install -y valac
+    - name: Install dependencies
+      run: |
+        sudo apt update
+        sudo apt install -y \
+          python3 python3-pip git ninja-build cmake clang pkg-config unzip \
+          curl wget build-essential
 
-      # 3️⃣ 克隆 Frida
-      - name: 克隆 Frida 16.5.6
-        uses: actions/checkout@v4
-        with:
-          repository: frida/frida
-          ref: 16.5.6
-          submodules: recursive
-          path: frida
+    - name: Setup Python env
+      run: |
+        pip3 install --upgrade pip
+        pip3 install setuptools wheel
 
-      # 4️⃣ 集成 ShadowHook
-      - name: 集成 ShadowHook
-        run: |
-          cd frida/subprojects/frida-gum/gum
-          git clone https://github.com/bytedance/android-inline-hook.git shadowhook
+    - name: Setup NDK
+      run: |
+        wget https://dl.google.com/android/repository/android-ndk-r25c-linux.zip
+        unzip android-ndk-r25c-linux.zip
+        echo "ANDROID_NDK_HOME=$PWD/android-ndk-r25c" >> $GITHUB_ENV
 
-      # 5️⃣ 注入自定义 Hook（替换 Interceptor）
-      - name: 注入 ShadowHook 代码
-        run: |
-          cd frida/subprojects/frida-gum/gum
+    - name: Bootstrap Frida
+      run: |
+        make bootstrap   # ⭐ 非常关键
 
-          cat > gumshadowhook.c << 'EOF'
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-          #include <pthread.h>
-          #include "shadowhook.h"
+    - name: Build Frida Core (Android ARM64)
+      run: |
+        make core-android-arm64
 
-          typedef struct {
-              void *target;
-              void *orig;
-          } HookEntry;
+    - name: Build Frida Gadget (Android ARM64)
+      run: |
+        make gadget-android-arm64
 
-          static HookEntry g_hooks[64];
-          static int g_count = 0;
-
-          static void hook_stub() {
-              if (g_hooks[0].orig)
-                  ((void (*)())g_hooks[0].orig)();
-          }
-
-          int gum_shadowhook_attach(void *target) {
-              if (!target) return -1;
-              HookEntry *e = &g_hooks[g_count++];
-              int r = shadowhook_hook_func_addr(
-                  target,
-                  (void *)hook_stub,
-                  (void **)&e->orig
-              );
-              return r;
-          }
-          EOF
-
-      - name: 替换 Interceptor
-        run: |
-          FILE=frida/subprojects/frida-gum/gum/guminterceptor.c
-          sed -i '1i extern int gum_shadowhook_attach(void *target);' $FILE
-          sed -i 's/gum_interceptor_attach.*/gum_interceptor_attach(GumInterceptor *self, gpointer function_address, GumInvocationListener *listener, gpointer data){ return gum_shadowhook_attach(function_address)==0?GUM_ATTACH_OK:GUM_ATTACH_ERROR; }/' $FILE
-
-      # 6️⃣ 去掉 RWX，防检测
-      - name: 去 RWX
-        run: |
-          find frida -name "gummemory.c" | xargs sed -i 's/PROT_READ | PROT_WRITE | PROT_EXEC/PROT_READ | PROT_WRITE/g'
-
-      # 7️⃣ 强制开启 server
-      - name: 强制开启 server
-        run: |
-          cd frida
-          export FRIDA_FORCE_SERVER=1
-          sed -i 's/server\s*:\s*false/server : true/g' releng/meson/meson_options.txt || true
-
-      # 8️⃣ 编译 Android ARM64 Server
-      - name: 编译 Frida Server (Android ARM64)
-        run: |
-          cd frida
-          make core-android-arm64 server-android-arm64
-
-      # 9️⃣ 查找产物
-      - name: 查找产物
-        run: |
-          cd frida
-          mkdir -p ../out
-          find build -name "frida-server" -type f | head -1 | xargs -I{} cp {} ../out/frida-server
-
-      # 🔟 打包
-      - name: 打包
-        run: |
-          cd out
-          zip frida-shadowhook.zip frida-server
-
-      # 1️⃣1️⃣ 上传产物
-      - name: 上传
-        uses: actions/upload-artifact@v4
-        with:
-          name: frida-shadowhook
-          path: out/frida-shadowhook.zip
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: frida-android-build
+        path: |
+          build/frida-core/**
+          build/frida-gadget/**
